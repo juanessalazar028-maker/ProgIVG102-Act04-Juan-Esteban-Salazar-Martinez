@@ -1,0 +1,486 @@
+from abc import ABC, abstractmethod
+from datetime import date, timedelta
+from typing import Protocol, runtime_checkable
+
+class BibliotecaError(Exception):
+    """Base de todos los errores propios del sistema de biblioteca."""
+
+class MaterialNoEncontrado(BibliotecaError):
+    """El ISBN solicitado no esta en el catalogo."""
+
+    def __init__(self, isbn):
+        super().__init__(f"ISBN {isbn} no esta en el catalogo")
+        self.isbn = isbn
+
+class MaterialNoDisponible(BibliotecaError):
+    """No quedan ejemplares del material solicitado."""
+
+    def __init__(self, titulo):
+        super().__init__(f"No hay ejemplares disponibles de {titulo}")
+        self.titulo = titulo
+
+class LimitePrestamosAlcanzado(BibliotecaError):
+    """El usuario ya tiene el maximo de prestamos activos que su tipo permite."""
+
+    def __init__(self, usuario):
+        super().__init__(f"{usuario.nombre} alcanzo su limite de prestamos "
+                         f"({usuario.limite_prestamos()})")
+        self.usuario = usuario
+
+class PrestamoYaDevuelto(BibliotecaError):
+    """Se intento devolver un prestamo que ya habia sido devuelto."""
+
+    def __init__(self, prestamo):
+        super().__init__(f"Prestamo de {prestamo.libro.titulo} ya devuelto "
+                         f"el {prestamo.fecha_devolucion_real}")
+        self.prestamo = prestamo
+
+class Material(ABC):
+    """Clase base abstracta: lo comun a todo material de la biblioteca."""
+
+    def __init__(self, titulo, autor, isbn, ejemplares_totales, **detalles):
+        self.titulo = titulo
+        self.autor = autor
+        self.isbn = isbn
+        self.ejemplares_totales = ejemplares_totales
+        self._ejemplares_disponibles = ejemplares_totales
+        self.detalles = detalles
+
+    @property
+    def disponibles(self):
+        """Getter: cantidad actual de ejemplares disponibles."""
+        return self._ejemplares_disponibles
+
+    @disponibles.setter
+    def disponibles(self, valor):
+        """Setter: valida que el valor este entre 0 y ejemplares_totales."""
+        if valor < 0 or valor > self.ejemplares_totales:
+            raise ValueError("disponibles debe estar entre 0 y ejemplares_totales")
+        self._ejemplares_disponibles = valor
+
+    def esta_disponible(self):
+        """True si queda al menos un ejemplar disponible."""
+        return self.disponibles > 0
+
+    def prestar(self):
+        """Reduce en 1 los ejemplares disponibles de este material."""
+        if not self.esta_disponible():
+            raise ValueError(f"No hay ejemplares disponibles de {self.titulo}")
+        self.disponibles = self.disponibles - 1
+
+    def devolver(self):
+        """Aumenta en 1 los ejemplares disponibles de este material."""
+        self.disponibles = self.disponibles + 1
+
+    @abstractmethod
+    def dias_prestamo(self):
+        """Cantidad de dias que puede prestarse este material."""
+
+    def __str__(self):
+        return f"{self.titulo} - {self.autor}"
+
+    def __repr__(self):
+        return (f"{type(self).__name__}(titulo={self.titulo!r}, "
+                f"autor={self.autor!r}, isbn={self.isbn!r}, "
+                f"ejemplares_totales={self.ejemplares_totales!r})")
+
+class LibroFisico(Material):
+    """Libro en papel: ademas de lo comun, tiene ubicacion en el estante."""
+
+    def __init__(self, titulo, autor, isbn, ejemplares_totales,
+                 ubicacion="Sin asignar", **detalles):
+        super().__init__(titulo, autor, isbn, ejemplares_totales, **detalles)
+        self.ubicacion = ubicacion
+
+    def dias_prestamo(self):
+        """Un libro fisico se presta por 14 dias."""
+        return 14
+
+    def __str__(self):
+        return f"{super().__str__()} [Fisico, estante {self.ubicacion}]"
+
+    def __repr__(self):
+        return (f"{type(self).__name__}(titulo={self.titulo!r}, "
+                f"autor={self.autor!r}, isbn={self.isbn!r}, "
+                f"ejemplares_totales={self.ejemplares_totales!r}, "
+                f"ubicacion={self.ubicacion!r})")
+
+class RecursoDigital(Material):
+    """Recurso en linea: ademas de lo comun, tiene formato y enlace de acceso."""
+
+    def __init__(self, titulo, autor, isbn, ejemplares_totales,
+                 formato="PDF", url="", **detalles):
+        super().__init__(titulo, autor, isbn, ejemplares_totales, **detalles)
+        self.formato = formato
+        self.url = url
+
+    def dias_prestamo(self):
+        """Un recurso digital se presta por 7 dias."""
+        return 7
+
+    def __str__(self):
+        return f"{super().__str__()} [Digital, {self.formato}]"
+
+    def __repr__(self):
+        return (f"{type(self).__name__}(titulo={self.titulo!r}, "
+                f"autor={self.autor!r}, isbn={self.isbn!r}, "
+                f"ejemplares_totales={self.ejemplares_totales!r}, "
+                f"formato={self.formato!r}, url={self.url!r})")
+
+class LibroHibrido(LibroFisico, RecursoDigital):
+    """Libro que existe en papel y en digital a la vez."""
+
+    def dias_prestamo(self):
+        """Se aplica el plazo mas corto de los dos padres."""
+        return min(LibroFisico.dias_prestamo(self),
+                   RecursoDigital.dias_prestamo(self))
+
+    def __repr__(self):
+        return (f"{type(self).__name__}(titulo={self.titulo!r}, "
+                f"autor={self.autor!r}, isbn={self.isbn!r}, "
+                f"ejemplares_totales={self.ejemplares_totales!r}, "
+                f"ubicacion={self.ubicacion!r}, formato={self.formato!r})")
+
+class Usuario(ABC):
+    """Base abstracta: lo comun a todo usuario y dos reglas que varian por tipo."""
+
+    def __init__(self, nombre, codigo_estudiantil):
+        self.nombre = nombre
+        self._codigo_estudiantil = codigo_estudiantil
+
+    @property
+    def codigo_estudiantil(self):
+        """Solo lectura: el codigo no deberia cambiar tras crear el usuario."""
+        return self._codigo_estudiantil
+
+    @property
+    def tipo(self):
+        """Tipo de usuario, tomado del nombre de la clase (estudiante, docente...)."""
+        return type(self).__name__.lower()
+
+    @staticmethod
+    def es_codigo_valido(codigo):
+        """Valida un codigo (10 digitos) sin necesitar un Usuario creado."""
+        return codigo.isdigit() and len(codigo) == 10
+
+    @abstractmethod
+    def limite_prestamos(self):
+        """Cantidad maxima de prestamos activos al mismo tiempo."""
+
+    @abstractmethod
+    def multa_por_dia(self):
+        """Valor de la multa por cada dia de retraso."""
+
+    def calcular_multa(self, dias_retraso):
+        """Multa total: es igual para todos, por eso se escribe una sola vez."""
+        return max(0, dias_retraso) * self.multa_por_dia()
+
+    def __str__(self):
+        return f"{self.nombre} ({self.tipo})"
+
+    def __repr__(self):
+        return (f"{type(self).__name__}(nombre={self.nombre!r}, "
+                f"codigo_estudiantil={self.codigo_estudiantil!r})")
+
+class Estudiante(Usuario):
+    """Estudiante: 3 prestamos a la vez y $500 de multa por dia."""
+
+    def limite_prestamos(self):
+        return 3
+
+    def multa_por_dia(self):
+        return 500
+
+class Docente(Usuario):
+    """Docente: 5 prestamos a la vez y $300 de multa por dia."""
+
+    def limite_prestamos(self):
+        return 5
+
+    def multa_por_dia(self):
+        return 300
+
+class Externo(Usuario):
+    """Persona externa: 1 prestamo a la vez y $1000 de multa por dia."""
+
+    def limite_prestamos(self):
+        return 1
+
+    def multa_por_dia(self):
+        return 1000
+
+class Investigador(Usuario):
+    """Investigador (Parte C): 10 prestamos a la vez y sin multa."""
+
+    def limite_prestamos(self):
+        return 10
+
+    def multa_por_dia(self):
+        return 0
+
+class Prestamo:
+    """Relaciona un material con un Usuario en un momento dado."""
+
+    def __init__(self, libro, usuario, fecha_inicio, fecha_devolucion_esperada):
+        self.libro = libro
+        self.usuario = usuario
+        self.fecha_inicio = fecha_inicio
+        self.fecha_devolucion_esperada = fecha_devolucion_esperada
+        self.fecha_devolucion_real = None 
+
+    @classmethod
+    def registrar_hoy(cls, libro: Material, usuario, dias_prestamo=None):
+        """Registra hoy el prestamo de cualquier Material.
+
+        Si no se fuerza un plazo, el propio material decide cuantos dias se presta.
+        """
+        hoy = date.today()
+        if dias_prestamo is None:
+            dias_prestamo = libro.dias_prestamo()
+        return cls(libro, usuario, hoy, hoy + timedelta(days=dias_prestamo))
+
+    @property
+    def activo(self):
+        """True mientras el prestamo no haya sido devuelto."""
+        return self.fecha_devolucion_real is None
+
+    def dias_retraso(self, fecha_real):
+        """Dias de retraso frente a la fecha esperada."""
+        return max(0, (fecha_real - self.fecha_devolucion_esperada).days)
+
+    def registrar_devolucion(self, fecha_real):
+        """Marca el prestamo como devuelto en la fecha indicada."""
+        self.fecha_devolucion_real = fecha_real
+
+    def __str__(self):
+        return (f"{self.libro.titulo} prestado a {self.usuario.nombre}: "
+                f"del {self.fecha_inicio} al {self.fecha_devolucion_esperada}")
+
+    def __repr__(self):
+        return (f"Prestamo(libro={self.libro!r}, usuario={self.usuario!r}, "
+                f"fecha_inicio={self.fecha_inicio!r}, "
+                f"fecha_devolucion_esperada={self.fecha_devolucion_esperada!r})")
+
+class ComprobantePrestamo:
+    """Comprobante inmutable: una vez emitido, no puede alterarse."""
+
+    __slots__ = ("_libro_titulo", "_usuario_nombre",
+                 "_fecha_inicio", "_fecha_devolucion_esperada")
+
+    def __init__(self, prestamo):
+        self._libro_titulo = prestamo.libro.titulo
+        self._usuario_nombre = prestamo.usuario.nombre
+        self._fecha_inicio = prestamo.fecha_inicio
+        self._fecha_devolucion_esperada = prestamo.fecha_devolucion_esperada
+
+    @property
+    def libro_titulo(self):
+        return self._libro_titulo
+
+    @property
+    def usuario_nombre(self):
+        return self._usuario_nombre
+
+    @property
+    def fecha_inicio(self):
+        return self._fecha_inicio
+
+    @property
+    def fecha_devolucion_esperada(self):
+        return self._fecha_devolucion_esperada
+
+class Notificador(ABC):
+
+    @abstractmethod
+    def enviar(self, destinatario, mensaje):
+        """Envia el mensaje al destinatario."""
+
+class NotificadorConsola(Notificador):
+    """Aviso por consola."""
+
+    def enviar(self, destinatario, mensaje):
+        print(f"      [consola] Para {destinatario}: {mensaje}")
+
+class NotificadorCorreo(Notificador):
+    """Simula un correo guardando los mensajes en una bandeja de salida."""
+
+    def __init__(self):
+        self.bandeja_salida = []
+
+    def enviar(self, destinatario, mensaje):
+        self.bandeja_salida.append((destinatario, mensaje))
+
+@runtime_checkable
+class CanalNotificacion(Protocol):
+    """Forma que debe tener cualquier canal: un metodo enviar"""
+
+    def enviar(self, destinatario, mensaje): ...
+
+class Biblioteca:
+    """Agrega materiales, compone sus prestamos y usa un canal de notificacion."""
+
+    def __init__(self, nombre, canal: CanalNotificacion):
+        # Falla de inmediato y con un mensaje si el canal no sirve,
+        if not isinstance(canal, CanalNotificacion):
+            raise TypeError("el canal debe tener el metodo "
+                            "enviar(destinatario, mensaje)")
+        self.nombre = nombre
+        self._catalogo = {} 
+        self._prestamos = []  # los crea y los posee la Biblioteca
+        self._canal = canal  # recibido desde afuera: cualquier objeto que sepa enviar()
+
+    def agregar_material(self, material):
+        """Agrega al catalogo un material que ya existe."""
+        self._catalogo[material.isbn] = material
+
+    def prestamos_activos_de(self, usuario):
+        """Prestamos de ese usuario que todavia no se han devuelto."""
+        return [p for p in self._prestamos
+                if p.usuario is usuario and p.activo]
+
+    def prestar(self, isbn, usuario):
+        """Presta el material con ese ISBN y avisa por el canal."""
+        try:
+            material = self._catalogo[isbn]
+        except KeyError as error:
+            raise MaterialNoEncontrado(isbn) from error
+        if len(self.prestamos_activos_de(usuario)) >= usuario.limite_prestamos():
+            raise LimitePrestamosAlcanzado(usuario)
+        # primero el paso que puede fallar; el ejemplar se descuenta despues
+        prestamo = Prestamo.registrar_hoy(material, usuario)
+        try:
+            material.prestar()
+        except ValueError as error:
+            raise MaterialNoDisponible(material.titulo) from error
+        self._prestamos.append(prestamo)
+        self._canal.enviar(usuario.nombre,
+                           f"Prestamo de {material.titulo}: devolver el "
+                           f"{prestamo.fecha_devolucion_esperada}")
+        return prestamo
+
+    def devolver(self, prestamo, fecha_real=None):
+        """Registra la devolucion, libera el ejemplar y cobra la multa por retraso."""
+        if not prestamo.activo:
+            raise PrestamoYaDevuelto(prestamo)
+        if fecha_real is None:
+            fecha_real = date.today()
+        multa = prestamo.usuario.calcular_multa(prestamo.dias_retraso(fecha_real))
+        prestamo.registrar_devolucion(fecha_real)
+        prestamo.libro.devolver()
+        if multa > 0:
+            self._canal.enviar(prestamo.usuario.nombre,
+                               f"Multa de ${multa} por devolver tarde "
+                               f"{prestamo.libro.titulo}")
+        return multa
+
+    def __len__(self):
+        return len(self._catalogo)
+
+    def __str__(self):
+        activos = sum(1 for p in self._prestamos if p.activo)
+        return f"{self.nombre}: {len(self)} materiales, prestamos activos: {activos}"
+
+class ServicioSMS:
+    def __init__(self):
+        self.enviados = []
+
+    def enviar(self, destinatario, mensaje):
+        self.enviados.append((destinatario, mensaje[:160]))
+
+if __name__ == "__main__":
+    # --- Creacion de objetos (datos de las guias) ---
+    fisico = LibroFisico("Clean Code", "Robert C. Martin",
+                         "978-0132350884", 2, ubicacion="B-12")
+    digital = RecursoDigital("Fluent Python", "Luciano Ramalho",
+                             "978-1492056355", 5, formato="EPUB")
+    camila = Estudiante("Camila Ruiz", "1093812345")
+    luis = Docente("Luis Mora", "1093800001")
+    ana = Externo("Ana Gil", "1093800002")
+    marta = Investigador("Marta Rios", "1093800003") 
+
+    print("== 1. Catalogo ==")
+    for material in (fisico, digital):
+        print(f"  {material}")
+        print(f"      {material.disponibles} de {material.ejemplares_totales} "
+              f"disponibles | plazo de prestamo: {material.dias_prestamo()} dias")
+
+    print("\n== 2. Usuarios ==")
+    for u in [camila, luis, ana, marta]:
+        print(f"  {u!s:<27} limite {u.limite_prestamos():>2} | "
+              f"multa/dia ${u.multa_por_dia():>4} | "
+              f"3 dias tarde: ${u.calcular_multa(3)}")
+
+    print("\n== 3. Biblioteca Jorge Roa Martinez (canal: NotificadorConsola) ==")
+    bib = Biblioteca("Biblioteca Jorge Roa Martinez", NotificadorConsola())
+    bib.agregar_material(fisico)
+    bib.agregar_material(digital)
+
+    print(f"  {camila.nombre} pide '{fisico.titulo}'")
+    p1 = bib.prestar(fisico.isbn, camila)
+    comprobante = ComprobantePrestamo(p1)  # solo lee el prestamo al construirse
+    print(f"      comprobante: '{comprobante.libro_titulo}' a nombre de "
+          f"{comprobante.usuario_nombre}, devolver el "
+          f"{comprobante.fecha_devolucion_esperada}")
+
+    print(f"  {ana.nombre} pide '{digital.titulo}'")
+    p2 = bib.prestar(digital.isbn, ana)
+
+    print(f"  {ana.nombre} pide tambien '{fisico.titulo}' "
+          f"(su limite es {ana.limite_prestamos()})")
+    try:
+        bib.prestar(fisico.isbn, ana)
+    except LimitePrestamosAlcanzado as error:
+        print(f"      RECHAZADO: {error}")
+
+    tarde = p1.fecha_devolucion_esperada + timedelta(days=5)
+    print(f"  {camila.nombre} devuelve '{fisico.titulo}' con 5 dias de retraso")
+    multa_1 = bib.devolver(p1, tarde)
+    print(f"      multa cobrada: ${multa_1}")
+    print(f"  {ana.nombre} devuelve '{digital.titulo}' a tiempo")
+    multa_2 = bib.devolver(p2)
+    print(f"      multa cobrada: ${multa_2}")
+
+    print("\n== 4. Casos de error (canal: NotificadorCorreo, avisos en bandeja) ==")
+    correo = NotificadorCorreo()
+    bib_correo = Biblioteca("Biblioteca Jorge Roa Martinez", correo)
+    bib_correo.agregar_material(fisico)
+    bib_correo.agregar_material(digital)
+
+    print(f"  {luis.nombre} y {marta.nombre} piden '{fisico.titulo}' "
+          f"(se agotan los {fisico.ejemplares_totales} ejemplares)")
+    p3 = bib_correo.prestar(fisico.isbn, luis)
+    bib_correo.prestar(fisico.isbn, marta)
+
+    intentos = [
+        (f"{camila.nombre} pide '{fisico.titulo}', que ya no tiene ejemplares",
+         bib_correo.prestar, (fisico.isbn, camila)),
+        (f"{camila.nombre} pide el ISBN 000, que no existe",
+         bib_correo.prestar, ("000", camila)),
+        (f"{luis.nombre} devuelve '{fisico.titulo}' a tiempo",
+         bib_correo.devolver, (p3,)),
+        (f"{luis.nombre} intenta devolver otra vez el mismo prestamo",
+         bib_correo.devolver, (p3,)),
+    ]
+    try:
+        for descripcion, operacion, argumentos in intentos:
+            print(f"  {descripcion}")
+            try:
+                operacion(*argumentos)
+            except BibliotecaError as error:  # captura toda la familia de errores
+                print(f"      RECHAZADO: {error}")
+            else:
+                print("      ACEPTADO")
+    finally:  # se muestra siempre, aunque alguna operacion falle
+        print(f"  Estado: {bib_correo}")
+        print(f"  Bandeja de correo ({len(correo.bandeja_salida)} avisos):")
+        for destinatario, mensaje in correo.bandeja_salida:
+            print(f"      Para {destinatario}: {mensaje}")
+
+    print("\n== 5. Canal externo (ServicioSMS no hereda de Notificador) ==")
+    sms = ServicioSMS()
+    bib_sms = Biblioteca("Otra", sms)  # acepta sms porque tiene enviar()
+    bib_sms.agregar_material(digital)
+    print(f"  {luis.nombre} pide '{digital.titulo}'")
+    bib_sms.prestar(digital.isbn, luis)
+    for destinatario, mensaje in sms.enviados:
+        print(f"      SMS para {destinatario}: {mensaje}")
